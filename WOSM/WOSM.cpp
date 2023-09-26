@@ -22,13 +22,12 @@
 //
 ///////////////////////////////////////////////////////////////////////////////
 // 
-// The IP address of the WOSM controller is available on the WOSM LCD screen.
-// e.g. "192.168.10.100" use port 23 or 1023 
+// The IP address of the WOSM controller is available on the WOSM LCD screen under "Info".
+// e.g. "192.168.10.100" use port 1023 (keep telnet port 23 for user login)
 // Upon connection via TCP/IP the WOSM reports its model ID and networking information 
 // and requests the user to enter an "admin password: " (default is "wosm")
-// It then enters "command mode" signified by the prompt:
+// It then enters "command mode" signified by the prompt "W>"
 // 
-// W>
 //
 // ============================
 //  WOSM Command-Set over-view:
@@ -73,11 +72,16 @@
 //                  examples:   W>dac_mode ps 3  ->line "s" as LED driver mode (3 = current mode)
 //                              W>dac_out ps 12.5  ->set line s to 12.5mA output
 // 
-// Motors, Steppers, Servos:
-// (not clear how these motors interact with "Stage" and "Analogue" x,y,z                      
+// Motors, Steppers:
 //          mot_    commands=   accl, bckl, dest, pos, out.. etc
 //                  example:    W>mot_out m3 27.5  ->moves motor to 27.5um absolute
 // 
+// PWM control for LEDs and R/C servos (5 channels 1 -> 5)
+//                 - PWM runs at 50Hz (r/c servos motor position) or 100kHz (LED brightness control)
+//          pwm_    commands=   out, on, set
+//                  Examples:   "pwm_set 2 percent=50.5"    # PWM2 duty cycle set to 50.5%
+//                              "pwm_set 2 on=1"            # PWM2 turn on/off (1/0) PWM output
+//                              "pwm_on 6                   # Multiple channels in single command, "6" indexes the 5 bitmapped PWM channels e.g.here  0 0 1 1 0
 // Stage control: 
 // (not clear how this works/interacts with pw,px,py,pz or with motor controls)
 //          stg_    command=    out, val, min, max
@@ -361,13 +365,16 @@ int CWOSMHub::GetControllerVersion(int& version)
     if ( ( travelX > 0 ) && ( travelY > 0 ) )  hasXYStage_ = true;
     if ( travelZ > 0 ) hasZStage_ = true;
 
-    // now initialise the LED DAC lines (ps->pv) to constant current mode (mode 3)
-    ret = SendSerialCommand(port_.c_str(), "dac_mode ps 3", "\r\n"); ret = GetSerialAnswer(port_.c_str(), "W>", answer);
-    ret = SendSerialCommand(port_.c_str(), "dac_mode pt 3", "\r\n"); ret = GetSerialAnswer(port_.c_str(), "W>", answer);
-    ret = SendSerialCommand(port_.c_str(), "dac_mode pu 3", "\r\n"); ret = GetSerialAnswer(port_.c_str(), "W>", answer);
-    ret = SendSerialCommand(port_.c_str(), "dac_mode pv 3", "\r\n"); ret = GetSerialAnswer(port_.c_str(), "W>", answer);
+    // ( now initialise the LED DAC lines (ps->pv) to inverted V-out mode (mode 3) for LED driver modules )
+    // NJC. No, let the user do this via the web gui, only needs setting once.
+    // otherwise the inverted V-out needed for the LED driver modules messes up the laser users (they usually want non-inverted...)
 
-    // now initialise the LED DIG lines (s->v) for gating (mode 12)
+    // ret = SendSerialCommand(port_.c_str(), "dac_mode ps 3", "\r\n"); ret = GetSerialAnswer(port_.c_str(), "W>", answer);
+    // ret = SendSerialCommand(port_.c_str(), "dac_mode pt 3", "\r\n"); ret = GetSerialAnswer(port_.c_str(), "W>", answer);
+    // ret = SendSerialCommand(port_.c_str(), "dac_mode pu 3", "\r\n"); ret = GetSerialAnswer(port_.c_str(), "W>", answer);
+    // ret = SendSerialCommand(port_.c_str(), "dac_mode pv 3", "\r\n"); ret = GetSerialAnswer(port_.c_str(), "W>", answer);
+
+    // now initialise the LED DIG lines (s->v) for analog channels (ps -> pv) gating (mode 12)    
     ret = SendSerialCommand(port_.c_str(), "dig_mode s 12", "\r\n"); ret = GetSerialAnswer(port_.c_str(), "W>", answer);
     ret = SendSerialCommand(port_.c_str(), "dig_mode t 12", "\r\n"); ret = GetSerialAnswer(port_.c_str(), "W>", answer);
     ret = SendSerialCommand(port_.c_str(), "dig_mode u 12", "\r\n"); ret = GetSerialAnswer(port_.c_str(), "W>", answer);
@@ -698,8 +705,8 @@ int CWOSMSwitch::Initialize()
     // In this version of the adpater we will control up to 8 switchable devices 
     // Using WOSM dig_out lines s,t,u,v,w,x,y,z (in this adapter we use x,y,z for stage control)
     // .. so we might "blank" those lines (x,y,z) to prevent accidentally switching to zero! 
-    // Anyway....  We will define up to 256 char labels for 256 options !
-    // 0="0", 2="2"...... 255="255"
+    // Anyway....  We will define up to 8192 char labels for 8192 options !
+    // 0="0", 2="2"...... 8192="8191"
     // you will see later "WriteToPort" method that we need to do some bit shifting to get the 
     // correct control-byte pattern (since in principle we have up to 26 control bits!! 
     // The ASCII labels are just the decimal numbers representing each bit-mapped switch pattern
@@ -857,7 +864,7 @@ int CWOSMSwitch::WriteToPort(long value)
     long valueL = value & 255;
     long valueH = ( value >> 8 ) & 255;
     char command[50];
-    unsigned int leng, PWMch;
+    unsigned int leng;
     unsigned long bytesRead = 0;
     unsigned char answer[50];
     unsigned long br = 0;
@@ -904,7 +911,8 @@ int CWOSMSwitch::WriteToPort(long value)
 
 // old command format (pre Sept 2023)
 // keep the top 8 bits and cycle through the 5 PWMchannels
-/*       for ( PWMch = 1; PWMch < 6; PWMch++ ) {
+/*          unsigned int PWMch;
+            for ( PWMch = 1; PWMch < 6; PWMch++ ) {
             leng = snprintf(( char* ) command, 50, "pwm_set %d on=%d\r\n", PWMch, ( valueH & 1 ));
             valueH = valueH >> 1;
             ret = hub->WriteToComPortH(( const unsigned char* ) command, leng);
@@ -1461,7 +1469,7 @@ int CWOSMShutter::WriteToPort(long value)
     long valueL = value & 255;
     long valueH = ( value >> 8 ) & 255;
     char command[50];
-    unsigned int leng, PWMch;
+    unsigned int leng;
     unsigned long bytesRead = 0;
     unsigned char answer[50];
     unsigned long br = 0;
@@ -1478,6 +1486,7 @@ int CWOSMShutter::WriteToPort(long value)
         leng = snprintf(( char* ) command, 50, "dig_out %d 0x3FC0000\r\n", valueL);
         ret = hub->WriteToComPortH(( const unsigned char* ) command, leng);
         if ( ret != DEVICE_OK )  return ret;
+
         std::ostringstream os;
         os << "Shutter::WriteToPort Command= " << command;
         LogMessage(os.str().c_str(), false);
@@ -1495,6 +1504,7 @@ int CWOSMShutter::WriteToPort(long value)
         leng = snprintf(( char* ) command, 50, "pwm_on %d\r\n", valueH );
         ret = hub->WriteToComPortH(( const unsigned char* ) command, leng);
         if ( ret != DEVICE_OK )  return ret;
+
         std::ostringstream xos;
         xos << "Shutter::WriteToPort Command= " << command;
         LogMessage(xos.str().c_str(), false);
@@ -1506,7 +1516,8 @@ int CWOSMShutter::WriteToPort(long value)
         }
 
   // old command format (pre Sept 2023) cycle through the 5 PWMchannels
-  /*     for ( PWMch = 1; PWMch < 6; PWMch++ ) {
+  /*    unsigned int PWMch;
+        for ( PWMch = 1; PWMch < 6; PWMch++ ) {
             leng = snprintf(( char* ) command, 50, "pwm_set %d on=%d\r\n", PWMch, ( valueH & 1 ));
             valueH = valueH >> 1;
             ret = hub->WriteToComPortH(( const unsigned char* ) command, leng);
@@ -1556,10 +1567,9 @@ int CWOSMShutter::OnOnOff(MM::PropertyBase* pProp, MM::ActionType eAct)
         long pos;
         pProp->Get(pos);
         int ret;
-        if ( pos == 0 )
-            ret = WriteToPort(0); // Shutter closed (write zeros to all LEDs)
-        else
-            ret = WriteToPort(hub->GetSwitchState()); // restore old setting
+
+        if ( pos == 0 )    ret = WriteToPort(0);                     // Shutter closed (write zeros to all LEDs)
+        else               ret = WriteToPort(hub->GetSwitchState()); // restore old setting
 
         if ( ret != DEVICE_OK )  return ret;
 
@@ -1586,7 +1596,6 @@ int CWOSMShutter::OnOnOff(MM::PropertyBase* pProp, MM::ActionType eAct)
 // => OnMaxVolts & => OnChannel just keep Volts and Channels within bounds
 // 
 // If we need anything fast or device-specific do it on the WOSM. 
-// USB transmit/receive latency will dominate.
 
 // CWOSMDA implementation
 CWOSMDA::CWOSMDA(int channel) :
@@ -1694,6 +1703,7 @@ int CWOSMDA::Shutdown()
 // Command: "dac_out ps 24.5"               # channel 's' DAC set to 24.5 mA (or however the OUT command is configured)
 // Command: "pwm_set 2 percent=50.5"        # PWM2 duty cycle set to 50.5%
 // Command: "pwm_set 2 on=1"                # PWM2 turn on/off (1/0) PWM output
+// Command  "pwm_on 6                       # "6" indexes the 5 bitmapped PWM channels e.g.here  0 0 1 1 0
 int CWOSMDA::WriteToPort(double value)
 {
     CWOSMHub* hub = static_cast< CWOSMHub* >( GetParentHub() );
@@ -1718,6 +1728,7 @@ int CWOSMDA::WriteToPort(double value)
             chan[0] = ( char ) ( '0' + ( channel_ - 7 )); chan[1] = 0;  // set PWM channels 1 - 5  on WOSM
             leng = snprintf(( char* ) command, 50, "pwm_set %s percent=%3.3f\r\n", ( char* ) chan, value);
         }
+
         std::stringstream ss;
         ss << "Sending...Command: " << command;
         LogMessage(ss.str().c_str(), false);
@@ -1848,7 +1859,7 @@ On the WOSM side, the XYZ channels have 16-bit resolution
 // CWOSMStage Implementation
 CWOSMStage::CWOSMStage() :
     stepSizeUm_(0.0001),
-    pos_um_(0.0),
+    pos_um_(50.0),
     busy_(false),
     initialized_(false),
     lowerLimit_(0.0),
@@ -1895,6 +1906,7 @@ int CWOSMStage::Initialize()
     if ( DEVICE_OK != ret ) return ret;
 
     upperLimit_ = travel;
+
     //Should we initialise stepsize as we do for X- Y- axes 
     //Suggest e.g. perhaps 10 digital bits per mouse-wheel click?
     //stepSizeUm_ = travel / 6553.6;
@@ -1960,11 +1972,10 @@ int CWOSMStage::MoveZ(double pos)
     LogMessage("after limits", false);
 
     char buf[50];
-    int length = sprintf(buf, "dac_out pz %3.3f\r\n", pos);
 
+    int length = sprintf(buf, "dac_out pz %3.3f\r\n", pos);
     std::stringstream ss;
-    ss << "Command: " << buf << "  Position set: " << pos;
-    LogMessage(ss.str().c_str(), false);
+    ss << "DAC Command:" << buf;
 
     MMThreadGuard myLock(hub->GetLock());
     hub->PurgeComPortH();
@@ -1982,9 +1993,29 @@ int CWOSMStage::MoveZ(double pos)
         bytesRead += br;
     }
 
+    length = sprintf(buf, "mot_out m1 %3.3f\r\n", pos);
+    ss << " then MOT Command:" << buf;
+    LogMessage(ss.str().c_str(), false);
+
+    hub->PurgeComPortH();
+
+    ret = hub->WriteToComPortH(( unsigned char* ) buf, length);
+    if ( ret != DEVICE_OK ) return ret;
+
+    startTime = GetCurrentMMTime();
+    bytesRead = 0;
+    answer[50];
+    while ( ( bytesRead < 50 ) && ( ( GetCurrentMMTime() - startTime ).getMsec() < 250 ) ) {
+        unsigned long br;
+        ret = hub->ReadFromComPortH(( unsigned char* ) answer + bytesRead, 1, br);
+        if ( answer[bytesRead] == '>' )  break;
+        bytesRead += br;
+    }
+
     answer[bytesRead] = 0; // string terminator
 
     hub->PurgeComPortH();
+
     if ( ret != DEVICE_OK ) return ret;
 
     //if ( answer[0] != 'W' )  return ERR_COMMUNICATION;
@@ -2619,8 +2650,6 @@ WOSMInputMonitorThread::~WOSMInputMonitorThread()
 }
 
 // I think this "free-running" thread is a 0.5s delay loop that polls the Digital I/O lines and reports changes
-// It is perhaps not "thread safe" because the "L" and "A" commands seems to interfere... I haven't debugged this.
-// It has probably been messed-up by my meddling!
 
 int WOSMInputMonitorThread::svc()
 {
